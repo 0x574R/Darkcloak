@@ -1,10 +1,26 @@
 # DARKCLOAK
 
+![NASM](https://img.shields.io/badge/language-NASM-blue)
+![Platform](https://img.shields.io/badge/platform-Linux-brightgreen)
+![Architecture](https://img.shields.io/badge/arch-x86--64-orange)
+
+
 **Linux process identity cloaking: x86-64 NASM, no libc**
 
 DARKCLOAK chains the manipulation of all userspace-visible identity sources into an 11-phase sequential pipeline that progressively transforms a process until it is indistinguishable from the impersonated one to monitoring tools. To our knowledge, no published tool combines simultaneous manipulation of all userspace-visible identity sources.
 
-The full technical write-up is available on the [RAZOR blog](https://0x574r.github.io).
+The full technical write-up is available on the [RAZOR](https://0x574r.github.io) blog.
+
+## What gets spoofed
+
+- `task_struct->comm`: via `PR_SET_NAME`
+- `argv[0]`: via direct stack overwrite
+- Command line (`/proc/$PID/cmdline`): via `PR_SET_MM_ARG_START/END`
+- Environment (`/proc/$PID/environ`): via `PR_SET_MM_ENV_START/END`
+- Executable path (`/proc/$PID/exe`): via `PR_SET_MM_EXE_FILE`
+- File-backed VMAs (`/proc/$PID/maps`): replaced with anonymous memory
+- Process namespace visibility: via `unshare`
+
 
 ## How it works
 
