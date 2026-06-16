@@ -66,7 +66,7 @@ To impersonate a different process, update these values before building.
 ## Usage
 
 ```
-sudo ./darkcloak
+./darkcloak
 ```
 
 Requires `CAP_SYS_RESOURCE`, `CAP_SETUID`, `CAP_SETGID`, and `CAP_SETPCAP` in the permitted set. If `CAP_SYS_RESOURCE` is absent, the MM spoofing block (VMA anonymization + `EXE_FILE` swap) is skipped entirely. If `CAP_SETPCAP` is absent, the tool falls back from `PR_SET_SECUREBITS` to `PR_SET_KEEPCAPS`.
