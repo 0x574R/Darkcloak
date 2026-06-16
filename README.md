@@ -1,124 +1,92 @@
-<div align="center">
-  <h1>DARKCLOAK</h1>
-  <p>Linux process identity cloaking — pure x86-64 NASM, zero libc</p>
+# DARKCLOAK
 
-  <img src="https://img.shields.io/badge/arch-x86__64-blue?style=flat-square"/>
-  <img src="https://img.shields.io/badge/language-NASM-informational?style=flat-square"/>
-  <img src="https://img.shields.io/badge/platform-Linux-lightgrey?style=flat-square"/>
-  <img src="https://img.shields.io/badge/libc-none-success?style=flat-square"/>
-  <img src="https://img.shields.io/badge/license-research%20only-red?style=flat-square"/>
+**Linux process identity cloaking — pure x86-64 NASM, zero libc**
 
-  <br/><br/>
-  <p><i>Part of the <a href="https://0x574r.github.io">RAZOR</a> offensive security research series.</i></p>
-</div>
+DARKCLOAK chains the manipulation of all userspace-visible identity sources into an 11-phase sequential pipeline that progressively transforms a process until it is indistinguishable from the impersonated one to monitoring tools. To our knowledge, no published tool combines simultaneous manipulation of all userspace-visible identity sources.
 
----
-
-## What is DARKCLOAK?
-
-DARKCLOAK is a process identity spoofing tool written entirely in x86-64 NASM assembly with no libc dependency and no dynamic linker. It manipulates five Linux kernel subsystems in a precise, ordered pipeline to make a running process appear as a legitimate system service — at the level of `ps`, `/proc`, auditd, and eBPF-based detectors.
-
-No C. No wrappers. Syscalls only.
+The full technical write-up is available on the [RAZOR blog](https://0x574r.github.io).
 
 ## How it works
 
-The execution pipeline has four phases:
+The pipeline runs in a strict order defined by the dependencies between the kernel subsystems being manipulated:
 
-```
-Phase 1 — Recon
-  Auxv parsing  →  getresuid/getresgid  →  setresuid(0,0,0)  →  capget/capset (full permitted→effective)
+1. **ELF introspection** — parses the auxiliary vector at `_start` to resolve the PHT and obtain the virtual address ranges of all three `PT_LOAD` segments
+2. **Credential read** — `getresuid` / `getresgid` to store original UIDs and GIDs for later restoration
+3. **UID escalation** — `setresuid(0,0,0)` if any of the three UIDs is 0
+4. **Capability escalation** — copies the permitted set into the effective and inheritable sets via `capget`/`capset`
+5. **Identity spoofing**:
+   - `prctl(PR_SET_NAME)` → overwrites `task_struct->comm`
+   - direct stack write at `[rsp+8]` → overwrites `argv[0]`
+   - `prctl(PR_SET_DUMPABLE, 0)` → blocks `/proc/$PID/mem` access and `ptrace(PTRACE_ATTACH)` from unprivileged processes
+   - VMA anonymization via mmap trampoline (see below) → removes all file-backed mappings
+   - `prctl(PR_SET_MM_ARG_START/END)` → redirects `/proc/$PID/cmdline`
+   - `prctl(PR_SET_MM_ENV_START/END)` → redirects `/proc/$PID/environ`
+   - `prctl(PR_SET_MM_EXE_FILE)` → replaces `mm_struct->exe_file`
+6. **Capability retention** — `PR_SET_SECUREBITS` (if `CAP_SETPCAP`) or `PR_SET_KEEPCAPS` (fallback) to survive the UID drop
+7. **UID de-escalation** — `setresuid(1000,1000,1000)` or restore originals
+8. **GID de-escalation** — `setresgid(1000,1000,1000)` or restore originals
+9. **Capability de-escalation** — clears effective and inheritable sets
+10. **Namespace isolation** — `unshare(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWIPC)`
+11. **Hold** — `nanosleep(120s)` then `exit`
 
-Phase 2 — Spoofing  (requires CAP_SYS_RESOURCE)
-  PR_SET_NAME  →  argv[0] overwrite  →  PR_SET_MM_ARG_*  →  PR_SET_MM_ENV_*
-  mmap trampoline  →  VMA anonymization (3× PT_LOAD)  →  PR_SET_MM_EXE_FILE
+## The mmap trampoline
 
-Phase 3 — Privilege drop
-  PR_SET_SECUREBITS / PR_SET_KEEPCAPS  →  setresuid  →  setresgid  →  capset (clear effective+inheritable)
+`PR_SET_MM_EXE_FILE` fails with `EBUSY` while any VMA is still backed by the original binary. Since the `.text` segment cannot be unmapped while RIP is inside it, the anonymization runs from a temporary anonymous page:
 
-Phase 4 — Isolation
-  unshare(CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNS)  →  nanosleep  →  exit
-```
+1. Allocate a 4096-byte anonymous page (`mmap`)
+2. Copy the anonymization code (`mm_start`→`mm_end`) and segment metadata into it
+3. Make the page executable (`mprotect`)
+4. Jump into it — RIP leaves `.text`
+5. For each of the three `PT_LOAD` segments: `mmap` a fresh anonymous region → `memcpy` segment contents → `munmap` the original → `mremap` the anonymous copy back to the original address → `mprotect` to restore original permissions
+6. Return to now-anonymous `.text`, unmap the trampoline page
 
-### Surfaces addressed
-
-| Kernel surface | Syscall / mechanism | Visible in |
-|---|---|---|
-| `task_struct->comm` | `prctl(PR_SET_NAME)` | `ps`, `top`, `pgrep`, auditd, `bpf_get_current_comm()` |
-| Command line | `argv[0]` stack overwrite + `PR_SET_MM_ARG_*` | `/proc/$PID/cmdline` |
-| Environment | `PR_SET_MM_ENV_*` | `/proc/$PID/environ` |
-| Executable path | `PR_SET_MM_EXE_FILE` | `/proc/$PID/exe` |
-| File-backed VMAs | `mmap` + `memcpy` + `munmap` + `mremap` + `mprotect` | `/proc/$PID/maps` |
-| Process namespace | `unshare()` | `/proc` enumeration, container scanners |
-
-### The mmap trampoline
-
-`PR_SET_MM_EXE_FILE` fails with `EBUSY` when any of the process's VMAs are still backed by the original binary file. DARKCLOAK resolves this by copying each `PT_LOAD` segment into a fresh anonymous mapping, unmapping the original file-backed VMA, and remapping the anonymous pages back at the same virtual address — before invoking `PR_SET_MM_EXE_FILE`. The trampoline itself executes from a temporary anonymous page to remain position-independent during the remap.
-
-Because the binary is a static ELF with no interpreter, the runtime VMA layout is fully deterministic: three `PT_LOAD` segments (read-only headers, read+execute text, read+write data), the stack, and the kernel vDSO. The anonymization loop handles all three in sequence.
-
-## Configuration
-
-Spoofing targets are set at compile time in the `.data` section of `darkcloak.asm`:
-
-```nasm
-mimic_name    db 'sshd', 0                      ; task_struct->comm
-mimic_argv    db './sshd', 0                     ; argv[0] replacement string
-mimic_exe     db '/usr/sbin/sshd', 0            ; target for PR_SET_MM_EXE_FILE
-mimic_cmdline db '/usr/sbin/sshd', 0, '-D', 0, ...  ; full spoofed cmdline
-mimic_environ db 'LANG=en_US.UTF-8', 0, ...    ; spoofed environment block
-```
+The binary is a static ELF with no interpreter, so the runtime VMA layout is fully deterministic: three `PT_LOAD` segments, the stack, and the kernel vDSO.
 
 ## Build
 
-```bash
-nasm -f elf64 -o darkcloak.o darkcloak.asm
-ld -o darkcloak darkcloak.o
+```
+nasm -f elf64 darkcloak.asm -o darkcloak.o
+ld darkcloak.o -o darkcloak
 ```
 
-Requirements: `nasm`, `ld`. No other toolchain needed.
+## Configuration
+
+Spoofing targets are defined at compile time in the `.data` section. The defaults impersonate `sshd`:
+
+```nasm
+mimic_name    db 'sshd', 0
+mimic_argv    db './sshd', 0
+mimic_exe     db '/usr/sbin/sshd', 0
+mimic_cmdline db '/usr/sbin/sshd', 0, '-D', 0, '-oCiphers=aes256-gcm@openssh.com', 0, ...
+mimic_environ db 'LANG=en_US.UTF-8', 0, 'NOTIFY_SOCKET=/run/systemd/notify', 0, ...
+```
+
+To impersonate a different process, update these values before building.
 
 ## Usage
 
-```bash
+```
 sudo ./darkcloak
 ```
 
-The binary must run with `CAP_SYS_RESOURCE`, `CAP_SETUID`, `CAP_SETGID`, and `CAP_SETPCAP` in the permitted set. If `CAP_SYS_RESOURCE` is absent, the MM spoofing phase (VMA anonymization + `EXE_FILE` swap) is skipped via a flag check on the effective capability bitmask. If `CAP_SETPCAP` is absent, the tool falls back from `PR_SET_SECUREBITS` to `PR_SET_KEEPCAPS` for capability retention across the UID drop.
+Requires `CAP_SYS_RESOURCE`, `CAP_SETUID`, `CAP_SETGID`, and `CAP_SETPCAP` in the permitted set. If `CAP_SYS_RESOURCE` is absent, the MM spoofing block (VMA anonymization + `EXE_FILE` swap) is skipped entirely. If `CAP_SETPCAP` is absent, the tool falls back from `PR_SET_SECUREBITS` to `PR_SET_KEEPCAPS`.
 
 ## Verify
 
-After the process is running, confirm the spoofed identity:
-
 ```bash
-# Spoofed comm
-cat /proc/$PID/status | grep -E "^Name:"
+./darkcloak &
+PID=$!
 
-# Spoofed cmdline
-cat /proc/$PID/cmdline | xargs -0
-
-# Spoofed exe symlink
+cat /proc/$PID/comm
 readlink /proc/$PID/exe
-
-# No file-backed VMAs (all anonymous)
-grep -v "^[0-9a-f].*/$" /proc/$PID/maps
-
-# Isolated namespace inodes
-ls -la /proc/$PID/ns/
+cat /proc/$PID/cmdline | tr '\0' ' '
+cat /proc/$PID/environ | tr '\0' '\n' | head -3
+cat /proc/$PID/maps | head -5
+cat /proc/$PID/status | grep -E 'Uid|Gid|Cap'
+ps aux | grep $PID
 ```
-
-## Limitations
-
-- Requires elevated privileges at startup (see above)
-- Spoofing data is static — target identity is baked in at compile time
-- Namespace isolation targets automated scanners, not manual analysis: a root operator can enter any namespace via `nsenter`
-- The `PR_SET_DUMPABLE 0` call prevents core dumps and restricts `/proc/$PID/` access to root, which is intentional but worth noting when debugging
-
-## Write-up
-
-The full technical series covering ELF internals, Linux process identity, and the complete DARKCLOAK implementation is published on the RAZOR blog:
-
-**→ [0x574r.github.io](https://0x574r.github.io)**
 
 ## Disclaimer
 
-This tool is intended strictly for authorized security research and educational purposes. Use only on systems you own or have explicit written permission to test. The author is not responsible for any misuse.
+Published exclusively for educational and research purposes. Use only on systems you own or have explicit written authorization to test.
+
