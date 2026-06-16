@@ -1,6 +1,6 @@
 # DARKCLOAK
 
-**Linux process identity cloaking — pure x86-64 NASM, zero libc**
+**Linux process identity cloaking: x86-64 NASM, no libc**
 
 DARKCLOAK chains the manipulation of all userspace-visible identity sources into an 11-phase sequential pipeline that progressively transforms a process until it is indistinguishable from the impersonated one to monitoring tools. To our knowledge, no published tool combines simultaneous manipulation of all userspace-visible identity sources.
 
@@ -10,10 +10,10 @@ The full technical write-up is available on the [RAZOR blog](https://0x574r.gith
 
 The pipeline runs in a strict order defined by the dependencies between the kernel subsystems being manipulated:
 
-1. **ELF introspection** — parses the auxiliary vector at `_start` to resolve the PHT and obtain the virtual address ranges of all three `PT_LOAD` segments
-2. **Credential read** — `getresuid` / `getresgid` to store original UIDs and GIDs for later restoration
-3. **UID escalation** — `setresuid(0,0,0)` if any of the three UIDs is 0
-4. **Capability escalation** — copies the permitted set into the effective and inheritable sets via `capget`/`capset`
+1. **ELF introspection**: parses the auxiliary vector at `_start` to resolve the PHT and obtain the virtual address ranges of all three `PT_LOAD` segments
+2. **Credential read**: `getresuid` / `getresgid` to store original UIDs and GIDs for later restoration
+3. **UID escalation**: `setresuid(0,0,0)` if any of the three UIDs is 0
+4. **Capability escalation**: copies the permitted set into the effective and inheritable sets via `capget`/`capset`
 5. **Identity spoofing**:
    - `prctl(PR_SET_NAME)` → overwrites `task_struct->comm`
    - direct stack write at `[rsp+8]` → overwrites `argv[0]`
@@ -22,12 +22,12 @@ The pipeline runs in a strict order defined by the dependencies between the kern
    - `prctl(PR_SET_MM_ARG_START/END)` → redirects `/proc/$PID/cmdline`
    - `prctl(PR_SET_MM_ENV_START/END)` → redirects `/proc/$PID/environ`
    - `prctl(PR_SET_MM_EXE_FILE)` → replaces `mm_struct->exe_file`
-6. **Capability retention** — `PR_SET_SECUREBITS` (if `CAP_SETPCAP`) or `PR_SET_KEEPCAPS` (fallback) to survive the UID drop
-7. **UID de-escalation** — `setresuid(1000,1000,1000)` or restore originals
-8. **GID de-escalation** — `setresgid(1000,1000,1000)` or restore originals
-9. **Capability de-escalation** — clears effective and inheritable sets
-10. **Namespace isolation** — `unshare(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWIPC)`
-11. **Hold** — `nanosleep(120s)` then `exit`
+6. **Capability retention**: `PR_SET_SECUREBITS` (if `CAP_SETPCAP`) or `PR_SET_KEEPCAPS` (fallback) to survive the UID drop
+7. **UID de-escalation**: `setresuid(1000,1000,1000)` or restore originals
+8. **GID de-escalation**: `setresgid(1000,1000,1000)` or restore originals
+9. **Capability de-escalation**: clears effective and inheritable sets
+10. **Namespace isolation**: `unshare(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWIPC)`
+11. **Hold**: `nanosleep(120s)` then `exit`
 
 ## The mmap trampoline
 
@@ -36,7 +36,7 @@ The pipeline runs in a strict order defined by the dependencies between the kern
 1. Allocate a 4096-byte anonymous page (`mmap`)
 2. Copy the anonymization code (`mm_start`→`mm_end`) and segment metadata into it
 3. Make the page executable (`mprotect`)
-4. Jump into it — RIP leaves `.text`
+4. Jump into it: RIP leaves `.text`
 5. For each of the three `PT_LOAD` segments: `mmap` a fresh anonymous region → `memcpy` segment contents → `munmap` the original → `mremap` the anonymous copy back to the original address → `mprotect` to restore original permissions
 6. Return to now-anonymous `.text`, unmap the trampoline page
 
