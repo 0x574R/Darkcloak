@@ -5,9 +5,9 @@
 ![Architecture](https://img.shields.io/badge/arch-x86--64-orange)
 
 
-**Linux process identity cloaking: x86-64 NASM, no libc**
+**Linux process identity cloaking**
 
-DARKCLOAK chains the manipulation of all userspace-visible identity sources into an 11-phase sequential pipeline that progressively transforms a process until it is indistinguishable from the impersonated one to monitoring tools. To our knowledge, no published tool combines simultaneous manipulation of all userspace-visible identity sources.
+DARKCLOAK chains the manipulation of all userspace-visible identity sources into an 11-phase sequential pipeline that progressively transforms a process until it becomes indistinguishable from the impersonated one to userspace monitoring tools. To the best of our knowledge, no published tool combines the simultaneous manipulation of all userspace-visible identity sources.
 
 The full technical write-up is available on the [RAZOR](https://0x574r.github.io) blog.
 
